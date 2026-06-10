@@ -1,0 +1,77 @@
+version: '3.8'
+
+services:
+  mongodb:
+    image: mongo:7.0
+    container_name: epic-poker-mongo
+    ports:
+      - "27017:27017"
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: password
+    volumes:
+      - mongo_data:/data/db
+    networks:
+      - epic-poker-network
+
+  redis:
+    image: redis:7-alpine
+    container_name: epic-poker-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - epic-poker-network
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: epic-poker-backend
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    environment:
+      NODE_ENV: development
+      PORT: 5000
+      SOCKET_PORT: 5001
+      MONGODB_URI: mongodb://root:password@mongodb:27017/epic-poker?authSource=admin
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: dev-secret-key-change-in-production
+      FRONTEND_URL: http://localhost:3000
+    depends_on:
+      - mongodb
+      - redis
+    volumes:
+      - ./backend:/app
+      - /app/node_modules
+    networks:
+      - epic-poker-network
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: epic-poker-frontend
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:5000
+      NEXT_PUBLIC_SOCKET_URL: http://localhost:5001
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+      - /app/.next
+    networks:
+      - epic-poker-network
+
+volumes:
+  mongo_data:
+  redis_data:
+
+networks:
+  epic-poker-network:
+    driver: bridge
