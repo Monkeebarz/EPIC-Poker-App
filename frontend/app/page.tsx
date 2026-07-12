@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import Image from 'next/image';
 
 export default function Home() {
   const [isLoggedIn, setIsLoggedIn] = useState(false);
@@ -14,19 +15,43 @@ export default function Home() {
         </p>
 
         {!isLoggedIn ? (
-          <div className="space-y-4">
-            <button className="bg-poker-gold text-black px-8 py-3 rounded-lg font-bold hover:bg-yellow-400 mr-4">
-              Sign Up
+          <div className="flex flex-col gap-6 items-center justify-center">
+            <button 
+              onClick={() => window.location.href = '/register'}
+              className="relative w-64 h-24 hover:opacity-90 transition-opacity"
+            >
+              <Image
+                src="/enter_lobby_button.png"
+                alt="Enter Lobby"
+                fill
+                className="object-contain"
+              />
             </button>
-            <button className="bg-blue-600 text-white px-8 py-3 rounded-lg font-bold hover:bg-blue-700">
-              Log In
+            <button 
+              onClick={() => window.location.href = '/login'}
+              className="relative w-64 h-24 hover:opacity-90 transition-opacity"
+            >
+              <Image
+                src="/sign_in_button.png"
+                alt="Sign In"
+                fill
+                className="object-contain"
+              />
             </button>
           </div>
         ) : (
           <div className="space-y-4">
             <p className="text-2xl text-poker-gold">Welcome to EPIC Poker!</p>
-            <button className="bg-green-600 text-white px-8 py-3 rounded-lg font-bold hover:bg-green-700">
-              Create Table
+            <button 
+              onClick={() => window.location.href = '/tables'}
+              className="relative w-64 h-24 hover:opacity-90 transition-opacity"
+            >
+              <Image
+                src="/create_account_button.png"
+                alt="Create Table"
+                fill
+                className="object-contain"
+              />
             </button>
           </div>
         )}
