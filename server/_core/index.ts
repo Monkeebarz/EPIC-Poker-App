@@ -4,15 +4,10 @@ import { createServer } from "http";
 import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
-import { registerOAuthProviderRoutes } from "../oauthProviders";
-import { registerUploadRoutes } from "../uploadRoutes";
 import { registerStorageProxy } from "./storageProxy";
-import { initializeSocketIO } from "../poker/gameRoom";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
-import { registerOgTagsMiddleware } from "../ogTags";
-import { registerAvatarProxy } from "../avatarProxy";
 
 function isPortAvailable(port: number): Promise<boolean> {
   return new Promise(resolve => {
@@ -40,10 +35,7 @@ async function startServer() {
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ limit: "50mb", extended: true }));
   registerStorageProxy(app);
-  registerAvatarProxy(app);
   registerOAuthRoutes(app);
-  registerOAuthProviderRoutes(app);
-  registerUploadRoutes(app);
   // tRPC API
   app.use(
     "/api/trpc",
@@ -52,18 +44,12 @@ async function startServer() {
       createContext,
     })
   );
-  // Dynamic OG tags for tournament share links (must be before Vite/static)
-  registerOgTagsMiddleware(app);
-
   // development mode uses Vite, production mode uses static files
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);
   } else {
     serveStatic(app);
   }
-
-  // Initialize Socket.IO for real-time poker
-  initializeSocketIO(server);
 
   const preferredPort = parseInt(process.env.PORT || "3000");
   const port = await findAvailablePort(preferredPort);
