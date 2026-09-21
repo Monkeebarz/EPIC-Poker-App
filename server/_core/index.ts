@@ -5,6 +5,7 @@ import net from "net";
 import { createExpressMiddleware } from "@trpc/server/adapters/express";
 import { registerOAuthRoutes } from "./oauth";
 import { registerStorageProxy } from "./storageProxy";
+import { initializeSocketIO } from "../poker/gameRoom";
 import { appRouter } from "../routers";
 import { createContext } from "./context";
 import { serveStatic, setupVite } from "./vite";
@@ -44,6 +45,8 @@ async function startServer() {
       createContext,
     })
   );
+  // Real-time Texas Hold'em gameplay shares this same HTTP server.
+  initializeSocketIO(server);
   // development mode uses Vite, production mode uses static files
   if (process.env.NODE_ENV === "development") {
     await setupVite(app, server);
