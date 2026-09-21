@@ -46,7 +46,7 @@ export default function Dashboard() {
               <span className="text-gold/50">•</span>
               <span>{user?.gamesPlayed || 0} tournaments played</span>
               <span className="text-gold/50">•</span>
-              <span>{(user?.epicChips || 10000).toLocaleString()} EPIC Chips</span>
+              <span>{user?.tournamentsWon || 0} tournament wins</span>
             </div>
           </div>
 
