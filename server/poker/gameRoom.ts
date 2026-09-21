@@ -12,6 +12,7 @@ import {
   startHand,
   processAction,
   getPlayerView,
+  drawInitialDealerSeat,
 } from "./engine";
 import * as db from "../db";
 
@@ -32,11 +33,13 @@ interface GameRoom {
   isStarted: boolean;
   hostUserId: number;
   blinds: { smallBlind: number; bigBlind: number; ante: number };
+  startingChips: number; // tournament configuration is authoritative; never derive stack from blind size
   turnTimerInterval: NodeJS.Timeout | null;
   nextHandTimer: NodeJS.Timeout | null;
   gameStartedAt: number | null; // timestamp when game started (for blind level timer)
   decisionTime: number; // seconds per turn
   inactiveKickMinutes: number; // 0 = disabled
+  tableSeatCount: number; // physical seats; preserves dead-button blind obligations
   lastActivityMap: Map<number, number>; // userId -> last action timestamp
   _prevCommunityCardCount?: number; // tracks community card count for deal audio events
 }
@@ -63,6 +66,9 @@ export function initializeSocketIO(server: HttpServer): SocketServer {
     console.log(`[Socket] Client connected: ${socket.id}`);
 
     socket.on("join_table", (data: { tableId: string; userId: number; displayName: string; avatarUrl: string | null }) => {
+      // Keep verified client display metadata for a later seat selection in the same socket session.
+      socket.data.displayName = data.displayName;
+      socket.data.avatarUrl = data.avatarUrl;
       handleJoinTable(socket, data);
     });
 
@@ -106,7 +112,8 @@ export function getOrCreateRoom(
   blinds: { smallBlind: number; bigBlind: number; ante: number },
   startingChips: number,
   decisionTime: number = 30,
-  inactiveKickMinutes: number = 0
+  inactiveKickMinutes: number = 0,
+  tableSeatCount: number = 8,
 ): GameRoom {
   if (rooms.has(tableId)) {
     return rooms.get(tableId)!;
@@ -120,11 +127,13 @@ export function getOrCreateRoom(
     isStarted: false,
     hostUserId,
     blinds,
+    startingChips,
     turnTimerInterval: null,
     nextHandTimer: null,
     gameStartedAt: null,
     decisionTime,
     inactiveKickMinutes,
+    tableSeatCount,
     lastActivityMap: new Map(),
   };
 
@@ -209,6 +218,10 @@ function handleTakeSeat(socket: Socket, data: { tableId: string; userId: number;
     socket.emit("error", { message: "Game already started" });
     return;
   }
+  if (!Number.isInteger(data.seatIndex) || data.seatIndex < 0 || data.seatIndex >= room.tableSeatCount) {
+    socket.emit("error", { message: "Invalid seat" });
+    return;
+  }
 
   // Check if seat is taken
   const seatTaken = room.players.find(p => p.seatIndex === data.seatIndex);
@@ -223,13 +236,13 @@ function handleTakeSeat(socket: Socket, data: { tableId: string; userId: number;
     // Move seat
     existingPlayer.seatIndex = data.seatIndex;
   } else {
-    // Get player info from socket data or use defaults
+    // Metadata was supplied during join_table; never replace a visible player identity with a numeric placeholder.
     room.players.push({
       oduserId: data.userId,
-      odisplayName: `Player ${data.userId}`,
-      avatarUrl: null,
+      odisplayName: socket.data.displayName || `Player ${data.userId}`,
+      avatarUrl: socket.data.avatarUrl || null,
       seatIndex: data.seatIndex,
-      chips: 0, // Will be set when game starts
+      chips: 0, // Set from the tournament's configured starting stack at game start.
       socketId: socket.id,
     });
   }
@@ -281,7 +294,7 @@ function handleStartGame(socket: Socket, data: { tableId: string; userId: number
   }).catch(() => {});
 
   // Initialize game state
-  const startingChips = room.blinds.bigBlind * 100; // Default 100 BB
+  const startingChips = room.startingChips;
   const players = room.players.map(p => ({
     userId: p.oduserId,
     displayName: p.odisplayName,
@@ -295,11 +308,25 @@ function handleStartGame(socket: Socket, data: { tableId: string; userId: number
     if (p.chips <= 0) p.chips = startingChips;
   }
 
-  const dealerSeat = room.players[0].seatIndex;
-  room.gameState = createGameState(room.tournamentId, room.tableId, players, room.blinds, dealerSeat);
-  
-  // Start first hand
+  // The initial button is decided once by a high-card draw; all future positions come only from seat rotation.
+  const buttonDraw = drawInitialDealerSeat(room.players);
+  room.gameState = createGameState(
+    room.tournamentId,
+    room.tableId,
+    players,
+    room.blinds,
+    buttonDraw.dealerSeat,
+    room.tableSeatCount,
+  );
+
+  // Start first hand with the assigned button, then retain the draw in the auditable hand history.
   room.gameState = startHand(room.gameState);
+  room.gameState.handHistory.unshift({
+    handNumber: room.gameState.handNumber,
+    action: "initial_button_draw",
+    cards: buttonDraw.draws.map(draw => draw.card),
+    timestamp: Date.now(),
+  });
 
   // Emit deal event for audio sync
   io?.to(room.tableId).emit("deal_cards_event", { type: 'hole_cards' });
