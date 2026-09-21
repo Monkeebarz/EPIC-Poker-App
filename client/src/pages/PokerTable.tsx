@@ -5,6 +5,7 @@ import { useParams, useLocation } from "wouter";
 import { io, Socket } from "socket.io-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { FeltSkin, SKINS } from "@/components/PokerSkinThemes";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 import {
@@ -29,9 +30,6 @@ function getFriendlyErrorMessage(rawError: string): string {
   return 'An error occurred. Please try again.';
 }
 
-const TABLE_PORTRAIT_URL = "/table-portrait.jpg";
-const TABLE_LANDSCAPE_URL = "/table-landscape.jpg";
-
 // ============================================================
 // CARD COMPONENT — Big, readable, PokerNow-style
 // ============================================================
@@ -44,8 +42,8 @@ function CardDisplay({
   faceDown?: boolean;
   size?: "xs" | "sm" | "md" | "lg";
 }) {
-  const dims = { xs: "w-8 h-12", sm: "w-12 h-[68px]", md: "w-16 h-[92px]", lg: "w-20 h-[112px]" };
-  const textSz = { xs: "text-[9px]", sm: "text-xs", md: "text-sm", lg: "text-base" };
+  const dims = { xs: "w-8 h-12", sm: "w-10 h-[60px]", md: "w-14 h-[82px]", lg: "w-[68px] h-[98px]" };
+  const textSz = { xs: "text-[9px]", sm: "text-[10px]", md: "text-sm", lg: "text-base" };
   const suitSz = { xs: "text-base", sm: "text-xl", md: "text-3xl", lg: "text-4xl" };
 
   if (faceDown || card === "back") {
@@ -68,7 +66,14 @@ function CardDisplay({
   const suitMap: Record<string, string> = { h: "\u2665", d: "\u2666", c: "\u2663", s: "\u2660" };
   const sym = suitMap[suit] || "?";
   const isRed = suit === "h" || suit === "d";
-  const col = isRed ? "text-red-500" : "text-gray-900";
+  const col = suit === "c" ? "text-emerald-50" : suit === "s" ? "text-zinc-100" : "text-white";
+  const cardSurface = suit === "c"
+    ? "bg-gradient-to-br from-[#15803d] to-[#065f2a] border-emerald-300/70"
+    : suit === "s"
+    ? "bg-gradient-to-br from-[#25252b] to-[#09090b] border-zinc-300/60"
+    : suit === "h"
+    ? "bg-gradient-to-br from-[#dc2626] to-[#991b1b] border-red-200/70"
+    : "bg-gradient-to-br from-[#1d4ed8] to-[#1e3a8a] border-blue-200/70";
   const rankMap: Record<string, string> = { T: "10", J: "J", Q: "Q", K: "K", A: "A" };
   const r = rankMap[rank] || rank;
 
@@ -77,7 +82,7 @@ function CardDisplay({
       initial={{ rotateY: -90, opacity: 0 }}
       animate={{ rotateY: 0, opacity: 1 }}
       transition={{ duration: 0.35, ease: [0.23, 1, 0.32, 1] }}
-      className={`${dims[size]} bg-white border border-gray-300 rounded flex flex-col items-center justify-center shadow-xl relative overflow-hidden`}
+      className={`${dims[size]} ${cardSurface} border rounded-md flex flex-col items-center justify-center shadow-xl relative overflow-hidden`}
     >
       <div className={`absolute top-0.5 left-0.5 flex flex-col items-center leading-none ${textSz[size]}`}>
         <span className={`font-bold ${col}`}>{r}</span>
@@ -111,6 +116,7 @@ function PlayerSeat({
   cardSize?: "xs" | "sm" | "md" | "lg";
 }) {
   const hasCards = player.holeCards && player.holeCards.length > 0;
+  const hasAvatar = Boolean(player.avatarUrl);
   const showHandLabel = player.handDescription && !player.hasFolded;
 
   // CHECK badge fade-out: track when lastAction becomes 'check' and hide after 1.5s
@@ -150,15 +156,29 @@ function PlayerSeat({
   const showActionBadge = actionDisplay && (actionDisplay.isCheck ? checkVisible : true);
 
   return (
-    <div className="flex flex-col items-center gap-0.5 relative">
+    <div className="flex flex-col items-center gap-0.5 relative min-w-[74px]">
       {/* Hole cards */}
-      {hasCards && (
+      {hasCards && !hasAvatar && (
         <div className={`flex -space-x-2 mb-0.5 ${player.hasFolded ? "opacity-30 grayscale" : ""}`}>
           {player.holeCards.map((card: string, i: number) => (
             <div key={i} style={{ transform: `rotate(${i === 0 ? "-6deg" : "6deg"})`, zIndex: i }}>
               <CardDisplay card={card} faceDown={card === "back"} size={cardSize} />
             </div>
           ))}
+        </div>
+      )}
+
+      {/* Portrait avatar alternative for a player who has not exposed their cards. */}
+      {hasAvatar && (
+        <div className="relative mb-0.5">
+          <img
+            src={player.avatarUrl}
+            alt=""
+            className={`w-12 h-12 rounded-full object-cover border-2 shadow-lg ${isCurrentTurn ? "border-yellow-400" : "border-[#caa146]/80"} ${player.hasFolded ? "grayscale opacity-40" : ""}`}
+          />
+          <span className="absolute -top-1 -left-1 rounded-sm border border-yellow-100 bg-[#caa146] px-1 text-[8px] font-extrabold text-black">
+            {player.level ?? player.seatIndex + 1}
+          </span>
         </div>
       )}
 
@@ -206,12 +226,12 @@ function PlayerSeat({
       <div
         className={`relative rounded px-3 py-1 min-w-[80px] text-center ${
           isCurrentTurn
-            ? "border-2 border-yellow-400 bg-black/90 shadow-lg shadow-yellow-400/30"
+            ? "border-2 border-yellow-400 bg-black/95 shadow-lg shadow-yellow-400/30"
             : player.hasFolded
             ? "border border-gray-700/30 bg-black/50 opacity-50"
             : isMe
-            ? "border border-yellow-500/50 bg-black/85"
-            : "border border-gray-600/40 bg-black/75"
+            ? "border border-yellow-500/80 bg-black/95"
+            : "border border-[#caa146]/65 bg-black/90"
         }`}
       >
         {/* Dealer button */}
@@ -230,11 +250,11 @@ function PlayerSeat({
           />
         )}
 
-        <p className="text-xs font-semibold text-white truncate max-w-[90px]">
+        <p className="text-[11px] font-semibold text-white truncate max-w-[96px]">
           {player.odisplayName || "Player"}
         </p>
         <div className="flex items-center justify-center gap-1">
-          <span className="text-xs text-yellow-400 font-mono font-bold">
+          <span className="text-[11px] text-cyan-400 font-mono font-extrabold">
             {(player.chips || 0).toLocaleString()}
           </span>
           {winAmount && winAmount > 0 && (
@@ -271,29 +291,29 @@ function PlayerSeat({
 function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string; y: string }[] {
   const portrait: Record<number, { x: string; y: string }[]> = {
     2: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "50%", y: "13%" },
     ],
     3: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "15%", y: "35%" },
       { x: "85%", y: "35%" },
     ],
     4: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "12%", y: "50%" },
       { x: "50%", y: "13%" },
       { x: "88%", y: "50%" },
     ],
     5: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "10%", y: "62%" },
       { x: "18%", y: "18%" },
       { x: "82%", y: "18%" },
       { x: "90%", y: "62%" },
     ],
     6: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "8%", y: "65%" },
       { x: "10%", y: "25%" },
       { x: "50%", y: "10%" },
@@ -301,7 +321,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "92%", y: "65%" },
     ],
     7: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "8%", y: "70%" },
       { x: "6%", y: "38%" },
       { x: "28%", y: "10%" },
@@ -310,7 +330,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "92%", y: "70%" },
     ],
     8: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "10%", y: "72%" },
       { x: "5%", y: "44%" },
       { x: "20%", y: "12%" },
@@ -320,7 +340,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "90%", y: "72%" },
     ],
     9: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "12%", y: "74%" },
       { x: "5%", y: "50%" },
       { x: "10%", y: "22%" },
@@ -331,7 +351,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "88%", y: "74%" },
     ],
     10: [
-      { x: "50%", y: "82%" },
+      { x: "18%", y: "81%" },
       { x: "14%", y: "76%" },
       { x: "5%", y: "55%" },
       { x: "5%", y: "30%" },
@@ -346,29 +366,29 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
 
   const landscape: Record<number, { x: string; y: string }[]> = {
     2: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "50%", y: "10%" },
     ],
     3: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "8%", y: "45%" },
       { x: "92%", y: "45%" },
     ],
     4: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "6%", y: "50%" },
       { x: "50%", y: "8%" },
       { x: "94%", y: "50%" },
     ],
     5: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "8%", y: "65%" },
       { x: "8%", y: "25%" },
       { x: "92%", y: "25%" },
       { x: "92%", y: "65%" },
     ],
     6: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "6%", y: "65%" },
       { x: "6%", y: "25%" },
       { x: "50%", y: "8%" },
@@ -376,7 +396,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "94%", y: "65%" },
     ],
     7: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "10%", y: "70%" },
       { x: "4%", y: "42%" },
       { x: "20%", y: "10%" },
@@ -385,7 +405,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "90%", y: "70%" },
     ],
     8: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "12%", y: "75%" },
       { x: "4%", y: "48%" },
       { x: "14%", y: "12%" },
@@ -395,7 +415,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "88%", y: "75%" },
     ],
     9: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "14%", y: "78%" },
       { x: "4%", y: "52%" },
       { x: "6%", y: "22%" },
@@ -406,7 +426,7 @@ function getSeatPositions(totalSeats: number, isLandscape: boolean): { x: string
       { x: "86%", y: "78%" },
     ],
     10: [
-      { x: "50%", y: "82%" },
+      { x: "24%", y: "80%" },
       { x: "14%", y: "80%" },
       { x: "4%", y: "56%" },
       { x: "4%", y: "30%" },
@@ -588,6 +608,7 @@ export default function PokerTable() {
   const [roomInfo, setRoomInfo] = useState<any>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [isLandscape, setIsLandscape] = useState(false);
+  const [activeSkin, setActiveSkin] = useState<FeltSkin>("cosmic_black");
   const [showLog, setShowLog] = useState(false);
   const [gameOverData, setGameOverData] = useState<any>(null);
   const [showGameOver, setShowGameOver] = useState(false);
@@ -1049,7 +1070,6 @@ export default function PokerTable() {
   const minRaise = gameState ? gameState.currentBet + gameState.minRaise : 0;
   const maxRaise = myPlayer ? myPlayer.chips + (myPlayer?.currentBet || 0) : 0;
   const totalPot = gameState?.pots?.reduce((sum: number, pot: any) => sum + pot.amount, 0) || 0;
-  const doubleRaise = gameState ? gameState.currentBet * 2 : 0;
 
   useEffect(() => {
     if (canAct && minRaise > 0) setRaiseAmount(minRaise);
@@ -1097,6 +1117,8 @@ export default function PokerTable() {
 
   const activePlayers = orderedPlayers.filter((p: any) => !p.hasFolded && p.chips > 0).length;
 
+  const currentTheme = SKINS[activeSkin];
+
   return (
     <div className="h-[100dvh] w-full bg-[#050508] flex flex-col overflow-hidden select-none">
 
@@ -1105,13 +1127,18 @@ export default function PokerTable() {
         <div className="flex items-center gap-2">
           <button
             onClick={() => navigate(`/tournaments/${id}`)}
-            className="text-gray-400 hover:text-yellow-500 text-[11px] transition-colors"
+            className="rounded-full border border-emerald-400/80 bg-emerald-950/90 px-3 py-1 text-[10px] font-extrabold tracking-wide text-emerald-200 shadow-[0_0_10px_rgba(34,197,94,0.25)] hover:bg-emerald-900"
+            title="Return to tournament"
           >
-            &larr;
+            {myPlayer?.holeCards?.[0]?.[0] || "•"} {myPlayer?.holeCards?.[1]?.[0] || "•"}
           </button>
-          <span className="text-gray-500 text-[9px] uppercase tracking-wider cursor-pointer hover:text-yellow-500">Options</span>
-          <span className="text-gray-500 text-[9px] uppercase tracking-wider cursor-pointer hover:text-yellow-500">Leave</span>
-          <span className="text-gray-500 text-[9px] uppercase tracking-wider cursor-pointer hover:text-yellow-500">Away</span>
+          <button
+            onClick={() => setShowChat(!showChat)}
+            className="rounded-full border border-zinc-500/60 bg-black/70 px-3 py-1 text-sm leading-none text-zinc-300 hover:bg-zinc-900"
+            title="Open table chat"
+          >
+            +
+          </button>
         </div>
 
         <div className="text-center flex-1 px-2">
@@ -1135,6 +1162,16 @@ export default function PokerTable() {
             {soundEnabled ? "\uD83D\uDD0A" : "\uD83D\uDD07"}
           </button>
           <button
+            onClick={() => {
+              const skins: FeltSkin[] = ["cosmic_black", "casino_green", "purple_lightning"];
+              setActiveSkin(skins[(skins.indexOf(activeSkin) + 1) % skins.length]);
+            }}
+            className="border border-yellow-500/40 rounded-full px-2 py-0.5 text-yellow-300 text-[9px] uppercase tracking-wide font-bold hover:bg-yellow-500/10 transition-colors"
+            title="Change felt skin"
+          >
+            {currentTheme.name}
+          </button>
+          <button
             onClick={() => setShowLog(!showLog)}
             className="text-yellow-500 text-[9px] uppercase tracking-wider font-bold hover:text-yellow-300 transition-colors"
           >
@@ -1146,18 +1183,34 @@ export default function PokerTable() {
       {/* ===== TABLE AREA — ~80% ===== */}
       <div className="flex-1 relative overflow-hidden bg-[#050508]">
 
-        {/* Felt image — fills entire viewport like PokerNow */}
+        {/* Three-skin celestial table surface: decorative only; gameplay data stays in the existing bindings below. */}
+        <div
+          className="absolute inset-0 bg-cover bg-center opacity-80 pointer-events-none"
+          style={{ backgroundImage: "url('/assets/cosmic_starfield.jpg')" }}
+        />
+        <img src="/assets/gold_gear.png" alt="" className="absolute -top-12 -left-12 w-36 h-36 opacity-60 pointer-events-none" />
+        <img src="/assets/gold_gear.png" alt="" className="absolute -top-14 -right-12 w-44 h-44 opacity-60 pointer-events-none rotate-45" />
+        <img src="/assets/gold_gear.png" alt="" className="absolute -bottom-14 -left-14 w-44 h-44 opacity-55 pointer-events-none -rotate-12" />
+        <div
+          className={`absolute ${isLandscape ? "inset-x-[5%] inset-y-[10%] rounded-[220px]" : "inset-x-[3%] inset-y-[3%] rounded-[180px]"} border-4 ${currentTheme.tableBorder} ${currentTheme.innerGlow} pointer-events-none`}
+          style={{ background: currentTheme.feltBg }}
+        >
+          <div className="absolute inset-1 rounded-[inherit] border border-yellow-300/25" />
+          {activeSkin === "purple_lightning" && <div className="absolute inset-0 rounded-[inherit] bg-[radial-gradient(ellipse_at_center,rgba(216,180,254,0.14),transparent_65%)]" />}
+        </div>
+
+        {/* Fixed central EPIC Poker brand lockup. */}
         <img
-          src={isLandscape ? TABLE_LANDSCAPE_URL : TABLE_PORTRAIT_URL}
-          alt=""
-          className="absolute inset-0 w-full h-full object-cover"
+          src="/assets/epic_poker_logo.png"
+          alt="Epic Poker"
+          className={`absolute left-1/2 -translate-x-1/2 z-10 pointer-events-none object-contain drop-shadow-[0_5px_12px_rgba(0,0,0,0.85)] ${isLandscape ? "top-[16%] w-40" : "top-[17%] w-44"}`}
         />
 
-        {/* TOURNAMENT INFO — ABOVE community cards on the felt */}
+        {/* TOURNAMENT INFO — bound to original tournament data */}
         {gameState && (
           <div
             className="absolute left-1/2 -translate-x-1/2 text-center z-10"
-            style={{ top: isLandscape ? "8%" : "28%" }}
+            style={{ top: isLandscape ? "31%" : "32%" }}
           >
             <p className="text-[10px] text-yellow-500/90 font-bold font-serif drop-shadow tracking-wide">
               {tournament?.name || "EPIC Table"}
@@ -1178,7 +1231,7 @@ export default function PokerTable() {
             initial={{ scale: 0.8, opacity: 0 }}
             animate={{ scale: 1, opacity: 1 }}
             className="absolute left-1/2 -translate-x-1/2 z-10"
-            style={{ top: isLandscape ? "18%" : "35%" }}
+            style={{ top: isLandscape ? "59%" : "57%" }}
           >
             <div className="bg-black/80 border border-yellow-500/40 rounded-full px-3 py-0.5 flex items-center gap-1.5 shadow-lg">
               <div className="w-3 h-3 rounded-full bg-gradient-to-b from-yellow-400 to-yellow-700 border border-yellow-500/50" />
@@ -1192,7 +1245,7 @@ export default function PokerTable() {
           <div
             className="absolute left-1/2 z-10"
             style={{
-              top: isLandscape ? "50%" : "42%",
+              top: isLandscape ? "48%" : "44%",
               transform: isLandscape ? "translate(-50%, -50%)" : "translateX(-50%)",
             }}
           >
@@ -1222,7 +1275,7 @@ export default function PokerTable() {
         {currentBlinds && gameState && (
           <div
             className="absolute left-1/2 -translate-x-1/2 text-center z-10"
-            style={{ top: isLandscape ? "72%" : "58%" }}
+            style={{ top: isLandscape ? "70%" : "67%" }}
           >
             <p className="text-sm text-gray-200/90 font-bold uppercase tracking-wide drop-shadow">
               NLH ~ {currentBlinds.small}/{currentBlinds.big}
@@ -1539,7 +1592,7 @@ export default function PokerTable() {
           initial={{ y: 60 }}
           animate={{ y: 0 }}
           transition={{ type: "spring", stiffness: 300, damping: 30 }}
-          className="bg-[#0a0a12] border-t border-yellow-500/15 px-2 py-1.5 shrink-0 z-20"
+          className="bg-black/95 border-t border-yellow-500/35 px-2 py-2 shrink-0 z-20 backdrop-blur-md"
         >
           {/* Timer bar */}
           <div className="flex items-center gap-2 mb-1">
@@ -1593,39 +1646,33 @@ export default function PokerTable() {
             )}
           </AnimatePresence>
 
-          {/* Bet sizing row — pot-based presets */}
-          <div className="flex gap-1 mb-1">
-            <Button
-              onClick={() => handleRaise(Math.max(minRaise, Math.min(Math.floor(totalPot * 0.25), maxRaise)))}
-              disabled={Math.floor(totalPot * 0.25) < minRaise || minRaise > maxRaise}
-              variant="outline"
-              className="flex-1 border-purple-500/40 text-purple-300 hover:bg-purple-500/15 font-bold text-[10px] h-7 bg-transparent active:scale-97 transition-transform disabled:opacity-40"
-            >
-              ¼ Pot
-            </Button>
-            <Button
-              onClick={() => handleRaise(Math.max(minRaise, Math.min(Math.floor(totalPot * 0.5), maxRaise)))}
-              disabled={Math.floor(totalPot * 0.5) < minRaise || minRaise > maxRaise}
-              variant="outline"
-              className="flex-1 border-purple-500/40 text-purple-300 hover:bg-purple-500/15 font-bold text-[10px] h-7 bg-transparent active:scale-97 transition-transform disabled:opacity-40"
-            >
-              ½ Pot
-            </Button>
-            <Button
-              onClick={() => handleRaise(Math.max(minRaise, Math.min(totalPot, maxRaise)))}
-              disabled={totalPot < minRaise || minRaise > maxRaise}
-              variant="outline"
-              className="flex-1 border-purple-500/40 text-purple-300 hover:bg-purple-500/15 font-bold text-[10px] h-7 bg-transparent active:scale-97 transition-transform disabled:opacity-40"
-            >
-              Pot
-            </Button>
-            <Button
-              onClick={() => setShowCustomRaise(!showCustomRaise)}
-              variant="outline"
-              className={`flex-1 border-yellow-500/40 text-yellow-400 hover:bg-yellow-500/15 font-bold text-[10px] h-7 bg-transparent active:scale-97 transition-transform ${showCustomRaise ? "bg-yellow-500/15" : ""}`}
-            >
-              Custom
-            </Button>
+          {/* Reference-style quick bet ladder; each amount uses original raise validation. */}
+          <div className="grid grid-cols-4 gap-1.5 mb-2">
+            {[
+              { label: "100%", fraction: 1 },
+              { label: "75%", fraction: 0.75 },
+              { label: "50%", fraction: 0.5 },
+              { label: "33%", fraction: 0.33 },
+            ].map((preset) => {
+              const rawAmount = Math.floor(totalPot * preset.fraction);
+              // Poker rule guard: every preset remains a legal raise amount.
+              const amount = Math.max(minRaise, Math.min(rawAmount, maxRaise));
+              const disabled = totalPot <= 0 || rawAmount < minRaise || minRaise > maxRaise;
+              return (
+                <Button
+                  key={preset.label}
+                  onClick={() => handleRaise(amount)}
+                  disabled={disabled}
+                  variant="outline"
+                  className="h-12 border-[#caa146]/65 bg-zinc-950/95 px-1 text-yellow-300 hover:bg-yellow-500/10 active:scale-97 disabled:opacity-40"
+                >
+                  <span className="flex flex-col leading-tight">
+                    <span className="text-[9px] font-bold text-zinc-300">{preset.label} BET</span>
+                    <span className="font-mono text-sm font-extrabold">{amount.toLocaleString()}</span>
+                  </span>
+                </Button>
+              );
+            })}
           </div>
 
           {/* Action buttons — compact row */}
@@ -1633,38 +1680,37 @@ export default function PokerTable() {
             <Button
               onClick={handleFold}
               variant="outline"
-              className="flex-1 border-red-500/50 text-red-400 hover:bg-red-500/15 font-bold text-[11px] h-8 bg-transparent active:scale-97 transition-transform"
+              className="flex-1 border-[#caa146]/60 bg-zinc-950 text-yellow-100 hover:bg-zinc-800 font-bold text-[11px] h-11 active:scale-97 transition-transform"
             >
-              Fold
+              Check / Fold
             </Button>
 
             {canCheck ? (
               <Button
                 onClick={handleCheck}
-                className="flex-1 bg-green-700 hover:bg-green-600 text-white font-bold text-[11px] h-8 active:scale-97 transition-transform"
+                className="flex-1 bg-zinc-950 border border-[#caa146]/60 hover:bg-zinc-800 text-yellow-100 font-bold text-[11px] h-11 active:scale-97 transition-transform"
               >
                 Check
               </Button>
             ) : (
               <Button
                 onClick={handleCall}
-                className="flex-1 bg-green-700 hover:bg-green-600 text-white font-bold text-[11px] h-8 active:scale-97 transition-transform"
+                className="flex-1 bg-zinc-950 border border-[#caa146]/60 hover:bg-zinc-800 text-yellow-100 font-bold text-[11px] h-11 active:scale-97 transition-transform"
               >
                 Call {callAmount}
               </Button>
             )}
 
             <Button
-              onClick={() => handleRaise(Math.min(doubleRaise, maxRaise))}
-              disabled={doubleRaise > maxRaise || doubleRaise < minRaise}
-              className="flex-1 bg-gradient-to-r from-yellow-500 to-yellow-600 text-black font-bold text-[11px] h-8 hover:from-yellow-400 hover:to-yellow-500 active:scale-97 transition-transform disabled:opacity-40"
+              onClick={() => setShowCustomRaise(true)}
+              className="flex-1 bg-zinc-950 border border-[#caa146]/80 text-yellow-200 font-bold text-[11px] h-11 hover:bg-zinc-800 active:scale-97 transition-transform"
             >
-              Raise 2x
+              Custom Bet
             </Button>
 
             <Button
               onClick={handleAllIn}
-              className="shrink-0 px-3 bg-red-700 hover:bg-red-600 text-white font-bold text-[11px] h-8 active:scale-97 transition-transform"
+              className="shrink-0 px-3 bg-red-900/90 border border-red-400/60 hover:bg-red-800 text-white font-bold text-[11px] h-11 active:scale-97 transition-transform"
             >
               ALL IN
             </Button>

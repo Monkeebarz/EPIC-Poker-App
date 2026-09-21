@@ -156,13 +156,6 @@ export default function Profile() {
               </div>
             </div>
 
-            <div>
-              <label className="text-sm font-medium text-foreground mb-1.5 block">EPIC Chips</label>
-              <div className="epic-card p-3">
-                <span className="text-lg font-bold text-gold">{user?.epicChips?.toLocaleString() || "10,000"}</span>
-              </div>
-            </div>
-
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="text-sm font-medium text-foreground mb-1.5 block">Games Played</label>

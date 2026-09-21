@@ -221,7 +221,7 @@ export function compareHands(a: HandResult, b: HandResult): number {
 
 // Game state types
 export type BettingRound = 'preflop' | 'flop' | 'turn' | 'river';
-export type PlayerAction = 'fold' | 'check' | 'call' | 'raise' | 'all_in';
+export type PlayerAction = 'fold' | 'check' | 'call' | 'raise' | 'all_in' | 'small_blind' | 'big_blind';
 export type GamePhase = 'waiting' | 'dealing' | 'betting' | 'showdown' | 'hand_complete';
 
 export interface PlayerState {
@@ -231,8 +231,10 @@ export interface PlayerState {
   seatIndex: number;
   chips: number;
   holeCards: Card[];
-  currentBet: number;
+  /** All chips committed to the current hand, including antes, blinds and every street. */
   totalBetThisRound: number;
+  /** Chips committed in the current betting street. */
+  currentBet: number;
   hasFolded: boolean;
   hasActed: boolean;
   isAllIn: boolean;
@@ -243,7 +245,7 @@ export interface PlayerState {
 
 export interface PotInfo {
   amount: number;
-  eligiblePlayers: number[]; // seat indices
+  eligiblePlayers: number[];
 }
 
 export interface GameState {
@@ -256,17 +258,21 @@ export interface GameState {
   players: PlayerState[];
   pots: PotInfo[];
   currentBet: number;
+  /** Last full raise increment; a new raise must increase the total by at least this much. */
   minRaise: number;
+  /** Physical button position. It may be empty between hands under dead-button tournament rules. */
   dealerSeat: number;
   smallBlindSeat: number;
   bigBlindSeat: number;
   currentPlayerSeat: number;
+  /** Physical seat count, used to preserve button/blind rotation through empty seats. */
+  tableSeatCount?: number;
   smallBlindAmount: number;
   bigBlindAmount: number;
   anteAmount: number;
   handNumber: number;
-  turnTimer: number; // seconds remaining
-  turnStartTime: number; // timestamp
+  turnTimer: number;
+  turnStartTime: number;
   handHistory: HandHistoryEntry[];
 }
 
@@ -280,13 +286,47 @@ export interface HandHistoryEntry {
   timestamp: number;
 }
 
-// Game logic functions
+export interface InitialDealerDraw {
+  dealerSeat: number;
+  draws: Array<{ seatIndex: number; card: Card }>;
+}
+
+const BUTTON_SUIT_VALUES: Record<Suit, number> = { c: 1, d: 2, h: 3, s: 4 };
+
+/**
+ * One-time button draw: highest rank wins, then spades > hearts > diamonds > clubs.
+ * This is deliberately separate from every later hand, where seat rotation is the only authority.
+ */
+export function drawInitialDealerSeat(
+  players: Array<{ seatIndex: number }>,
+  deck: Card[] = shuffleDeck(createDeck()),
+  referenceSeat = 0,
+): InitialDealerDraw {
+  if (players.length < 2) throw new Error('At least two seated players are required for the button draw');
+  const seatOrder = [...players]
+    .sort((a, b) => a.seatIndex - b.seatIndex)
+    .map(player => player.seatIndex);
+  const start = seatOrder.findIndex(seat => seat > referenceSeat);
+  const orderedSeats = start === -1
+    ? seatOrder
+    : [...seatOrder.slice(start), ...seatOrder.slice(0, start)];
+  const draws = orderedSeats.map(seatIndex => ({ seatIndex, card: deck.pop()! }));
+  const winner = draws.reduce((best, draw) => {
+    const bestRank = RANK_VALUES[best.card[0] as Rank];
+    const drawRank = RANK_VALUES[draw.card[0] as Rank];
+    if (drawRank !== bestRank) return drawRank > bestRank ? draw : best;
+    return BUTTON_SUIT_VALUES[draw.card[1] as Suit] > BUTTON_SUIT_VALUES[best.card[1] as Suit] ? draw : best;
+  });
+  return { dealerSeat: winner.seatIndex, draws };
+}
+
 export function createGameState(
   tournamentId: number,
   tableId: string,
   players: { userId: number; displayName: string; avatarUrl: string | null; seatIndex: number; chips: number }[],
   blinds: { smallBlind: number; bigBlind: number; ante: number },
-  dealerSeat: number
+  dealerSeat: number,
+  tableSeatCount?: number,
 ): GameState {
   const playerStates: PlayerState[] = players.map(p => ({
     oduserId: p.userId,
@@ -303,6 +343,7 @@ export function createGameState(
     isConnected: true,
     isSittingOut: false,
   }));
+  const inferredSeatCount = Math.max(2, ...playerStates.map(player => player.seatIndex + 1));
 
   return {
     tournamentId,
@@ -312,13 +353,14 @@ export function createGameState(
     deck: [],
     communityCards: [],
     players: playerStates,
-    pots: [{ amount: 0, eligiblePlayers: playerStates.map(p => p.seatIndex) }],
+    pots: [{ amount: 0, eligiblePlayers: playerStates.map(player => player.seatIndex) }],
     currentBet: 0,
     minRaise: blinds.bigBlind,
     dealerSeat,
     smallBlindSeat: -1,
     bigBlindSeat: -1,
     currentPlayerSeat: -1,
+    tableSeatCount: Math.max(inferredSeatCount, tableSeatCount ?? 0),
     smallBlindAmount: blinds.smallBlind,
     bigBlindAmount: blinds.bigBlind,
     anteAmount: blinds.ante,
@@ -329,412 +371,385 @@ export function createGameState(
   };
 }
 
-// Get active (non-folded, non-all-in) players in seat order starting from a position
-function getActivePlayers(state: GameState): PlayerState[] {
-  return state.players.filter(p => !p.hasFolded && !p.isAllIn && p.chips > 0);
+function seatCount(state: GameState): number {
+  return Math.max(2, state.tableSeatCount ?? 0, ...state.players.map(player => player.seatIndex + 1));
 }
 
-function getPlayersInHand(state: GameState): PlayerState[] {
-  return state.players.filter(p => !p.hasFolded);
+function nextPhysicalSeat(state: GameState, fromSeat: number): number {
+  return (fromSeat + 1) % seatCount(state);
 }
 
-// Get next active seat after a given seat
-function getNextActiveSeat(state: GameState, fromSeat: number, includeAllIn: boolean = false): number {
-  const playerCount = state.players.length;
-  let seat = fromSeat;
-  
-  for (let i = 0; i < playerCount; i++) {
-    seat = (seat + 1) % playerCount;
-    const player = state.players.find(p => p.seatIndex === seat);
-    if (player && !player.hasFolded && (!player.isAllIn || includeAllIn)) {
-      return seat;
-    }
-  }
-  return fromSeat;
+function clockwiseDistance(state: GameState, fromSeat: number, seatIndex: number, includeFrom = false): number {
+  const distance = (seatIndex - fromSeat + seatCount(state)) % seatCount(state);
+  return distance === 0 && !includeFrom ? seatCount(state) : distance;
 }
 
-// Start a new hand
+function isEligibleForHand(player: PlayerState): boolean {
+  return player.chips > 0 && !player.isSittingOut;
+}
+
+function getPlayersClockwiseFrom(
+  state: GameState,
+  fromSeat: number,
+  predicate: (player: PlayerState) => boolean,
+  includeFrom = false,
+): PlayerState[] {
+  return state.players
+    .filter(predicate)
+    .sort((a, b) => clockwiseDistance(state, fromSeat, a.seatIndex, includeFrom) - clockwiseDistance(state, fromSeat, b.seatIndex, includeFrom));
+}
+
+function getNextActiveSeat(state: GameState, fromSeat: number, includeAllIn = false): number {
+  const next = getPlayersClockwiseFrom(
+    state,
+    fromSeat,
+    player => !player.hasFolded && !player.isSittingOut && (includeAllIn || (!player.isAllIn && player.chips > 0)),
+  )[0];
+  return next?.seatIndex ?? -1;
+}
+
+function getNextPlayerNeedingAction(state: GameState, fromSeat: number): number {
+  const next = getPlayersClockwiseFrom(
+    state,
+    fromSeat,
+    // A prior full bet/raise resets hasActed=false for affected players.
+    // An under-sized all-in can raise the amount to call for players who have not acted yet,
+    // but it does not reopen action for players who already acted/called.
+    player => !player.hasFolded && !player.isSittingOut && !player.isAllIn && !player.hasActed,
+  )[0];
+  return next?.seatIndex ?? -1;
+}
+
+function postForcedContribution(state: GameState, player: PlayerState, amount: number, action: 'small_blind' | 'big_blind'): void {
+  const posted = Math.min(amount, player.chips);
+  player.chips -= posted;
+  player.currentBet += posted;
+  player.totalBetThisRound += posted;
+  player.lastAction = action;
+  state.pots[0].amount += posted;
+  if (player.chips === 0) player.isAllIn = true;
+}
+
+/** Starts a hand with physical-seat button/blind rotation and standard one-card-at-a-time dealing. */
 export function startHand(state: GameState): GameState {
-  const newState = { ...state };
-  newState.handNumber++;
-  newState.phase = 'dealing';
-  newState.bettingRound = 'preflop';
-  newState.communityCards = [];
-  newState.currentBet = 0;
-  newState.pots = [{ amount: 0, eligiblePlayers: state.players.filter(p => p.chips > 0).map(p => p.seatIndex) }];
-  newState.handHistory = [];
-  
-  // Reset player states
-  newState.players = state.players.map(p => ({
-    ...p,
-    holeCards: [],
+  const newState: GameState = {
+    ...state,
+    handNumber: state.handNumber + 1,
+    phase: 'dealing',
+    bettingRound: 'preflop',
+    communityCards: [],
     currentBet: 0,
-    totalBetThisRound: 0,
-    hasFolded: p.chips <= 0, // auto-fold players with no chips
-    hasActed: false,
-    isAllIn: false,
-    lastAction: undefined,
-  }));
-  
-  // Shuffle and deal
-  newState.deck = shuffleDeck(createDeck());
-  
-  // Determine blinds positions
-  const activePlayers = newState.players.filter(p => !p.hasFolded);
-  if (activePlayers.length === 2) {
-    // Heads-up: dealer is small blind
-    newState.smallBlindSeat = newState.dealerSeat;
-    newState.bigBlindSeat = getNextActiveSeat(newState, newState.dealerSeat, true);
-  } else {
-    newState.smallBlindSeat = getNextActiveSeat(newState, newState.dealerSeat, true);
-    newState.bigBlindSeat = getNextActiveSeat(newState, newState.smallBlindSeat, true);
+    minRaise: state.bigBlindAmount,
+    handHistory: [],
+    deck: shuffleDeck(createDeck()),
+    players: state.players.map(player => ({
+      ...player,
+      holeCards: [],
+      currentBet: 0,
+      totalBetThisRound: 0,
+      hasFolded: !isEligibleForHand(player),
+      hasActed: false,
+      isAllIn: false,
+      lastAction: undefined,
+    })),
+    pots: [{ amount: 0, eligiblePlayers: state.players.filter(isEligibleForHand).map(player => player.seatIndex) }],
+  };
+
+  const livePlayers = newState.players.filter(player => !player.hasFolded);
+  if (livePlayers.length < 2) {
+    return { ...newState, phase: 'waiting', currentPlayerSeat: -1 };
   }
-  
-  // Post antes
+
+  const headsUp = livePlayers.length === 2;
+  let smallBlindPosition: number;
+  let bigBlindPosition: number;
+  if (headsUp) {
+    // In heads-up, the button is the SB and acts first preflop.
+    const buttonPlayer = newState.players.find(player => player.seatIndex === newState.dealerSeat && !player.hasFolded)
+      ?? getPlayersClockwiseFrom(newState, newState.dealerSeat, player => !player.hasFolded)[0];
+    newState.dealerSeat = buttonPlayer.seatIndex;
+    smallBlindPosition = buttonPlayer.seatIndex;
+    bigBlindPosition = getNextActiveSeat(newState, smallBlindPosition, true);
+  } else {
+    // Dead button is preserved physically: blind positions are never shifted to make a gap convenient.
+    smallBlindPosition = nextPhysicalSeat(newState, newState.dealerSeat);
+    bigBlindPosition = nextPhysicalSeat(newState, smallBlindPosition);
+  }
+
+  const sbPlayer = newState.players.find(player => player.seatIndex === smallBlindPosition && !player.hasFolded);
+  const bbPlayer = newState.players.find(player => player.seatIndex === bigBlindPosition && !player.hasFolded);
+  newState.smallBlindSeat = sbPlayer ? smallBlindPosition : -1;
+  newState.bigBlindSeat = bbPlayer ? bigBlindPosition : -1;
+
   if (newState.anteAmount > 0) {
-    for (const player of newState.players) {
-      if (!player.hasFolded) {
-        const ante = Math.min(newState.anteAmount, player.chips);
-        player.chips -= ante;
-        newState.pots[0].amount += ante;
-        if (player.chips === 0) player.isAllIn = true;
-      }
-    }
+    for (const player of livePlayers) postForcedContribution(newState, player, newState.anteAmount, 'small_blind');
     newState.handHistory.push({ handNumber: newState.handNumber, action: 'antes_posted', amount: newState.anteAmount, timestamp: Date.now() });
   }
-  
-  // Post blinds
-  const sbPlayer = newState.players.find(p => p.seatIndex === newState.smallBlindSeat)!;
-  const sbAmount = Math.min(newState.smallBlindAmount, sbPlayer.chips);
-  sbPlayer.chips -= sbAmount;
-  sbPlayer.currentBet = sbAmount;
-  sbPlayer.totalBetThisRound = sbAmount;
-  newState.pots[0].amount += sbAmount;
-  if (sbPlayer.chips === 0) sbPlayer.isAllIn = true;
-  
-  const bbPlayer = newState.players.find(p => p.seatIndex === newState.bigBlindSeat)!;
-  const bbAmount = Math.min(newState.bigBlindAmount, bbPlayer.chips);
-  bbPlayer.chips -= bbAmount;
-  bbPlayer.currentBet = bbAmount;
-  bbPlayer.totalBetThisRound = bbAmount;
-  newState.pots[0].amount += bbAmount;
-  if (bbPlayer.chips === 0) bbPlayer.isAllIn = true;
-  
+  if (sbPlayer) postForcedContribution(newState, sbPlayer, newState.smallBlindAmount, 'small_blind');
+  if (bbPlayer) postForcedContribution(newState, bbPlayer, newState.bigBlindAmount, 'big_blind');
+
   newState.currentBet = newState.bigBlindAmount;
   newState.minRaise = newState.bigBlindAmount;
-  
-  // Deal hole cards
-  for (const player of newState.players) {
-    if (!player.hasFolded) {
-      player.holeCards = [newState.deck.pop()!, newState.deck.pop()!];
-    }
+
+  // Standard deal: two full clockwise passes, beginning from the SB position (or next live seat after a dead SB).
+  const dealOrder = getPlayersClockwiseFrom(newState, smallBlindPosition, player => !player.hasFolded, true);
+  for (let cardNumber = 0; cardNumber < 2; cardNumber++) {
+    for (const player of dealOrder) player.holeCards.push(newState.deck.pop()!);
   }
-  
-  // Set first player to act (UTG = after big blind)
-  newState.currentPlayerSeat = getNextActiveSeat(newState, newState.bigBlindSeat);
+
+  // Heads-up exception: the button is the SB and opens preflop itself. In every
+  // multi-way hand, action opens immediately clockwise of the BB (UTG).
+  newState.currentPlayerSeat = headsUp
+    ? (sbPlayer && !sbPlayer.isAllIn ? sbPlayer.seatIndex : getNextPlayerNeedingAction(newState, smallBlindPosition))
+    : getNextPlayerNeedingAction(newState, bigBlindPosition);
   newState.phase = 'betting';
   newState.turnStartTime = Date.now();
-  
-  newState.handHistory.push({
-    handNumber: newState.handNumber,
-    action: 'hand_start',
-    timestamp: Date.now(),
-  });
-  
+  newState.handHistory.push({ handNumber: newState.handNumber, action: 'hand_start', timestamp: Date.now() });
   return newState;
 }
 
-// Process a player action
+function isBettingRoundComplete(state: GameState): boolean {
+  const canAct = state.players.filter(player => !player.hasFolded && !player.isSittingOut && !player.isAllIn);
+  // Full raises explicitly reset hasActed=false for live opponents.
+  // Partial all-ins do not, so completion must be keyed to hasActed rather than raw bet equality.
+  return canAct.every(player => player.hasActed);
+}
+
+function addActionHistory(state: GameState, player: PlayerState, action: PlayerAction, amount?: number): void {
+  state.handHistory.push({
+    handNumber: state.handNumber,
+    action,
+    player: player.odisplayName,
+    amount,
+    timestamp: Date.now(),
+  });
+}
+
+/** Applies only legal live-state actions. Partial all-ins increase the call amount but never reopen raising. */
 export function processAction(
   state: GameState,
   seatIndex: number,
   action: PlayerAction,
-  amount?: number
+  amount?: number,
 ): { state: GameState; error?: string } {
-  if (state.currentPlayerSeat !== seatIndex) {
-    return { state, error: 'Not your turn' };
-  }
-  
-  const player = state.players.find(p => p.seatIndex === seatIndex);
-  if (!player) return { state, error: 'Player not found' };
-  if (player.hasFolded) return { state, error: 'Player has folded' };
-  
+  if (state.currentPlayerSeat !== seatIndex) return { state, error: 'Not your turn' };
+  const originalPlayer = state.players.find(player => player.seatIndex === seatIndex);
+  if (!originalPlayer) return { state, error: 'Player not found' };
+  if (originalPlayer.hasFolded || originalPlayer.isSittingOut || originalPlayer.isAllIn) return { state, error: 'Player cannot act' };
+
   const newState = JSON.parse(JSON.stringify(state)) as GameState;
-  const currentPlayer = newState.players.find(p => p.seatIndex === seatIndex)!;
-  
+  const player = newState.players.find(candidate => candidate.seatIndex === seatIndex)!;
+  const previousBet = newState.currentBet;
+
   switch (action) {
-    case 'fold': {
-      currentPlayer.hasFolded = true;
-      currentPlayer.lastAction = 'fold';
-      currentPlayer.hasActed = true;
-      newState.handHistory.push({
-        handNumber: newState.handNumber,
-        action: 'fold',
-        player: currentPlayer.odisplayName,
-        timestamp: Date.now(),
-      });
+    case 'fold':
+      player.hasFolded = true;
+      player.hasActed = true;
+      player.lastAction = 'fold';
+      addActionHistory(newState, player, 'fold');
       break;
-    }
-    
-    case 'check': {
-      if (currentPlayer.currentBet < newState.currentBet) {
-        return { state, error: 'Cannot check, must call or raise' };
-      }
-      currentPlayer.lastAction = 'check';
-      currentPlayer.hasActed = true;
-      newState.handHistory.push({
-        handNumber: newState.handNumber,
-        action: 'check',
-        player: currentPlayer.odisplayName,
-        timestamp: Date.now(),
-      });
+
+    case 'check':
+      if (player.currentBet !== newState.currentBet) return { state, error: 'Cannot check while facing a bet' };
+      player.hasActed = true;
+      player.lastAction = 'check';
+      addActionHistory(newState, player, 'check');
       break;
-    }
-    
+
     case 'call': {
-      const callAmount = Math.min(newState.currentBet - currentPlayer.currentBet, currentPlayer.chips);
-      currentPlayer.chips -= callAmount;
-      currentPlayer.currentBet += callAmount;
-      currentPlayer.totalBetThisRound += callAmount;
-      newState.pots[0].amount += callAmount;
-      if (currentPlayer.chips === 0) currentPlayer.isAllIn = true;
-      currentPlayer.lastAction = currentPlayer.isAllIn ? 'all_in' : 'call';
-      currentPlayer.hasActed = true;
-      newState.handHistory.push({
-        handNumber: newState.handNumber,
-        action: currentPlayer.isAllIn ? 'all_in' : 'call',
-        player: currentPlayer.odisplayName,
-        amount: callAmount,
-        timestamp: Date.now(),
-      });
+      const callAmount = newState.currentBet - player.currentBet;
+      if (callAmount <= 0) return { state, error: 'Nothing to call; check instead' };
+      const paid = Math.min(callAmount, player.chips);
+      player.chips -= paid;
+      player.currentBet += paid;
+      player.totalBetThisRound += paid;
+      newState.pots[0].amount += paid;
+      player.isAllIn = player.chips === 0;
+      player.hasActed = true;
+      player.lastAction = player.isAllIn ? 'all_in' : 'call';
+      addActionHistory(newState, player, player.lastAction, paid);
       break;
     }
-    
-    case 'raise': {
-      const raiseAmount = amount || newState.currentBet * 2;
-      const totalToCall = raiseAmount - currentPlayer.currentBet;
-      
-      if (totalToCall > currentPlayer.chips) {
-        // All-in
-        const allInAmount = currentPlayer.chips;
-        currentPlayer.chips = 0;
-        currentPlayer.currentBet += allInAmount;
-        currentPlayer.totalBetThisRound += allInAmount;
-        newState.pots[0].amount += allInAmount;
-        currentPlayer.isAllIn = true;
-        currentPlayer.lastAction = 'all_in';
-        if (currentPlayer.currentBet > newState.currentBet) {
-          newState.minRaise = currentPlayer.currentBet - newState.currentBet;
-          newState.currentBet = currentPlayer.currentBet;
-          // Reset hasActed for other players since bet increased
-          for (const p of newState.players) {
-            if (p.seatIndex !== seatIndex && !p.hasFolded && !p.isAllIn) {
-              p.hasActed = false;
-            }
-          }
-        }
-      } else {
-        if (raiseAmount < newState.currentBet + newState.minRaise && currentPlayer.chips > totalToCall) {
-          return { state, error: `Minimum raise is ${newState.currentBet + newState.minRaise}` };
-        }
-        currentPlayer.chips -= totalToCall;
-        currentPlayer.currentBet = raiseAmount;
-        currentPlayer.totalBetThisRound += totalToCall;
-        newState.pots[0].amount += totalToCall;
-        newState.minRaise = raiseAmount - newState.currentBet;
-        newState.currentBet = raiseAmount;
-        currentPlayer.lastAction = 'raise';
-        // Reset hasActed for other players
-        for (const p of newState.players) {
-          if (p.seatIndex !== seatIndex && !p.hasFolded && !p.isAllIn) {
-            p.hasActed = false;
-          }
-        }
-      }
-      currentPlayer.hasActed = true;
-      newState.handHistory.push({
-        handNumber: newState.handNumber,
-        action: currentPlayer.isAllIn ? 'all_in' : 'raise',
-        player: currentPlayer.odisplayName,
-        amount: currentPlayer.currentBet,
-        timestamp: Date.now(),
-      });
-      break;
-    }
-    
+
+    case 'raise':
     case 'all_in': {
-      const allInAmount = currentPlayer.chips;
-      currentPlayer.currentBet += allInAmount;
-      currentPlayer.totalBetThisRound += allInAmount;
-      currentPlayer.chips = 0;
-      currentPlayer.isAllIn = true;
-      currentPlayer.lastAction = 'all_in';
-      currentPlayer.hasActed = true;
-      newState.pots[0].amount += allInAmount;
-      
-      if (currentPlayer.currentBet > newState.currentBet) {
-        newState.minRaise = currentPlayer.currentBet - newState.currentBet;
-        newState.currentBet = currentPlayer.currentBet;
-        for (const p of newState.players) {
-          if (p.seatIndex !== seatIndex && !p.hasFolded && !p.isAllIn) {
-            p.hasActed = false;
-          }
+      const availableTotal = player.currentBet + player.chips;
+      const requestedTotal = action === 'all_in' ? availableTotal : Math.floor(amount ?? 0);
+      if (!Number.isFinite(requestedTotal) || requestedTotal <= player.currentBet) {
+        return { state, error: 'Raise amount must exceed your current bet' };
+      }
+      const targetTotal = Math.min(requestedTotal, availableTotal);
+      const added = targetTotal - player.currentBet;
+      const raiseIncrement = targetTotal - newState.currentBet;
+      const isAllIn = targetTotal === availableTotal;
+
+      if (raiseIncrement <= 0) {
+        // An all-in for less than a call is a valid short call, not a raise.
+        player.chips -= added;
+        player.currentBet = targetTotal;
+        player.totalBetThisRound += added;
+        newState.pots[0].amount += added;
+        player.isAllIn = true;
+        player.hasActed = true;
+        player.lastAction = 'all_in';
+        addActionHistory(newState, player, 'all_in', added);
+        break;
+      }
+      if (player.hasActed) return { state, error: 'Action was not reopened by the prior bet' };
+      if (!isAllIn && targetTotal < newState.currentBet + newState.minRaise) {
+        return { state, error: `Minimum raise is ${newState.currentBet + newState.minRaise}` };
+      }
+
+      player.chips -= added;
+      player.currentBet = targetTotal;
+      player.totalBetThisRound += added;
+      newState.pots[0].amount += added;
+      player.isAllIn = isAllIn;
+      player.hasActed = true;
+      player.lastAction = isAllIn ? 'all_in' : 'raise';
+      newState.currentBet = targetTotal;
+
+      // Only a full raise reopens betting and establishes a new min-raise increment.
+      if (raiseIncrement >= newState.minRaise) {
+        newState.minRaise = raiseIncrement;
+        for (const other of newState.players) {
+          if (other.seatIndex !== player.seatIndex && !other.hasFolded && !other.isSittingOut && !other.isAllIn) other.hasActed = false;
         }
       }
-      newState.handHistory.push({
-        handNumber: newState.handNumber,
-        action: 'all_in',
-        player: currentPlayer.odisplayName,
-        amount: currentPlayer.currentBet,
-        timestamp: Date.now(),
-      });
+      addActionHistory(newState, player, player.lastAction, targetTotal);
       break;
     }
+
+    default:
+      return { state, error: 'Unsupported player action' };
   }
-  
-  // Check if hand is over (only one player remaining)
-  const playersInHand = newState.players.filter(p => !p.hasFolded);
-  if (playersInHand.length === 1) {
-    return { state: resolveHand(newState) };
-  }
-  
-  // Check if betting round is complete
-  const activePlayers = newState.players.filter(p => !p.hasFolded && !p.isAllIn);
-  const allActed = activePlayers.every(p => p.hasActed);
-  const allEvenBets = activePlayers.every(p => p.currentBet === newState.currentBet);
-  
-  if (allActed && allEvenBets) {
-    // Move to next round
-    return { state: advanceRound(newState) };
-  }
-  
-  // Move to next player
-  newState.currentPlayerSeat = getNextActiveSeat(newState, seatIndex);
+
+  const playersInHand = newState.players.filter(candidate => !candidate.hasFolded && !candidate.isSittingOut);
+  if (playersInHand.length === 1) return { state: resolveHand(newState) };
+  if (isBettingRoundComplete(newState)) return { state: advanceRound(newState) };
+
+  const nextSeat = getNextPlayerNeedingAction(newState, seatIndex);
+  if (nextSeat === -1) return { state: advanceRound(newState) };
+  newState.currentPlayerSeat = nextSeat;
   newState.turnStartTime = Date.now();
-  
   return { state: newState };
 }
 
-// Advance to next betting round
+function dealNextStreet(state: GameState): void {
+  if (state.bettingRound === 'preflop') {
+    state.bettingRound = 'flop';
+    state.deck.pop();
+    state.communityCards.push(state.deck.pop()!, state.deck.pop()!, state.deck.pop()!);
+    state.handHistory.push({ handNumber: state.handNumber, action: 'flop', cards: state.communityCards.slice(0, 3), timestamp: Date.now() });
+  } else if (state.bettingRound === 'flop') {
+    state.bettingRound = 'turn';
+    state.deck.pop();
+    state.communityCards.push(state.deck.pop()!);
+    state.handHistory.push({ handNumber: state.handNumber, action: 'turn', cards: [state.communityCards[3]], timestamp: Date.now() });
+  } else if (state.bettingRound === 'turn') {
+    state.bettingRound = 'river';
+    state.deck.pop();
+    state.communityCards.push(state.deck.pop()!);
+    state.handHistory.push({ handNumber: state.handNumber, action: 'river', cards: [state.communityCards[4]], timestamp: Date.now() });
+  }
+}
+
 function advanceRound(state: GameState): GameState {
-  const newState = { ...state };
-  
-  // Reset bets for new round
-  for (const player of newState.players) {
-    player.currentBet = 0;
-    player.hasActed = false;
-  }
-  newState.currentBet = 0;
-  newState.minRaise = newState.bigBlindAmount;
-  
-  // Check if all remaining players are all-in (run out the board)
-  const activePlayers = newState.players.filter(p => !p.hasFolded && !p.isAllIn);
-  
-  switch (newState.bettingRound) {
-    case 'preflop':
-      newState.bettingRound = 'flop';
-      newState.deck.pop(); // burn
-      newState.communityCards.push(newState.deck.pop()!, newState.deck.pop()!, newState.deck.pop()!);
-      newState.handHistory.push({ handNumber: newState.handNumber, action: 'flop', cards: newState.communityCards.slice(0, 3), timestamp: Date.now() });
-      break;
-    case 'flop':
-      newState.bettingRound = 'turn';
-      newState.deck.pop(); // burn
-      newState.communityCards.push(newState.deck.pop()!);
-      newState.handHistory.push({ handNumber: newState.handNumber, action: 'turn', cards: [newState.communityCards[3]], timestamp: Date.now() });
-      break;
-    case 'turn':
-      newState.bettingRound = 'river';
-      newState.deck.pop(); // burn
-      newState.communityCards.push(newState.deck.pop()!);
-      newState.handHistory.push({ handNumber: newState.handNumber, action: 'river', cards: [newState.communityCards[4]], timestamp: Date.now() });
-      break;
-    case 'river':
-      return resolveHand(newState);
-  }
-  
-  // If no active players can act (all all-in), run out remaining cards
-  if (activePlayers.length <= 1) {
-    // Run out remaining community cards
-    while (newState.communityCards.length < 5) {
-      newState.deck.pop(); // burn
-      newState.communityCards.push(newState.deck.pop()!);
-    }
+  const newState: GameState = {
+    ...state,
+    players: state.players.map(player => ({ ...player, currentBet: 0, hasActed: false })),
+    currentBet: 0,
+    minRaise: state.bigBlindAmount,
+  };
+  if (newState.bettingRound === 'river') return resolveHand(newState);
+  dealNextStreet(newState);
+
+  const playersAbleToAct = newState.players.filter(player => !player.hasFolded && !player.isSittingOut && !player.isAllIn);
+  if (playersAbleToAct.length <= 1) {
+    while (newState.communityCards.length < 5) dealNextStreet(newState);
     return resolveHand(newState);
   }
-  
-  // First to act post-flop is first active player after dealer
-  newState.currentPlayerSeat = getNextActiveSeat(newState, newState.dealerSeat);
+
+  // Every postflop street begins left of the button and ends on the button.
+  newState.currentPlayerSeat = getNextPlayerNeedingAction(newState, newState.dealerSeat);
   newState.turnStartTime = Date.now();
-  
   return newState;
 }
 
-// Resolve hand - determine winner(s) and distribute pot
+/** Builds main and side pots from actual hand contributions; folded chips remain in pots but cannot win them. */
+export function calculateSidePots(players: PlayerState[]): PotInfo[] {
+  const levels = Array.from(new Set<number>(players.map(player => player.totalBetThisRound).filter(amount => amount > 0))).sort((a, b) => a - b);
+  const pots: PotInfo[] = [];
+  let previousLevel = 0;
+  for (const level of levels) {
+    const contributors = players.filter(player => player.totalBetThisRound >= level);
+    const amount = (level - previousLevel) * contributors.length;
+    const eligiblePlayers = contributors.filter(player => !player.hasFolded && !player.isSittingOut).map(player => player.seatIndex);
+    if (amount > 0 && eligiblePlayers.length > 0) pots.push({ amount, eligiblePlayers });
+    previousLevel = level;
+  }
+  return pots;
+}
+
+function distributeOddChips(state: GameState, winners: PlayerState[], remainder: number): void {
+  const ordered = [...winners].sort((a, b) => clockwiseDistance(state, state.dealerSeat, a.seatIndex) - clockwiseDistance(state, state.dealerSeat, b.seatIndex));
+  for (let index = 0; index < remainder; index++) ordered[index % ordered.length].chips += 1;
+}
+
+/** Resolves every main/side pot separately and moves the physical button exactly one seat clockwise. */
 export function resolveHand(state: GameState): GameState {
-  const newState = { ...state };
-  newState.phase = 'showdown';
-  
-  const playersInHand = newState.players.filter(p => !p.hasFolded);
-  
-  // If only one player left, they win
+  const newState: GameState = { ...state, players: state.players.map(player => ({ ...player })), phase: 'showdown' };
+  const playersInHand = newState.players.filter(player => !player.hasFolded && !player.isSittingOut);
+
   if (playersInHand.length === 1) {
     const winner = playersInHand[0];
-    const totalPot = newState.pots.reduce((sum, pot) => sum + pot.amount, 0);
-    winner.chips += totalPot;
-    newState.pots = [{ amount: 0, eligiblePlayers: [] }];
-    newState.handHistory.push({
-      handNumber: newState.handNumber,
-      action: 'win',
-      player: winner.odisplayName,
-      amount: totalPot,
-      timestamp: Date.now(),
-    });
-    newState.phase = 'hand_complete';
-    return newState;
+    const amount = newState.pots.reduce((sum, pot) => sum + pot.amount, 0);
+    winner.chips += amount;
+    newState.handHistory.push({ handNumber: newState.handNumber, action: 'win', player: winner.odisplayName, amount, timestamp: Date.now() });
+  } else {
+    const handResults = playersInHand.map(player => ({ player, result: evaluateHand(player.holeCards, newState.communityCards) }));
+    const sidePots = calculateSidePots(newState.players);
+    const winnings = new Map<number, { amount: number; description: string }>();
+
+    for (const pot of sidePots) {
+      const contenders = handResults.filter(entry => pot.eligiblePlayers.includes(entry.player.seatIndex));
+      if (contenders.length === 0) continue;
+      const bestResult = contenders.reduce((best, entry) => compareHands(entry.result, best.result) > 0 ? entry : best).result;
+      const winners = contenders.filter(entry => compareHands(entry.result, bestResult) === 0).map(entry => entry.player);
+      const share = Math.floor(pot.amount / winners.length);
+      for (const winner of winners) {
+        winner.chips += share;
+        const existing = winnings.get(winner.seatIndex) ?? { amount: 0, description: bestResult.description };
+        winnings.set(winner.seatIndex, { amount: existing.amount + share, description: bestResult.description });
+      }
+      const remainder = pot.amount - share * winners.length;
+      if (remainder > 0) {
+        distributeOddChips(newState, winners, remainder);
+        const oddChipOrder = [...winners].sort((a, b) => clockwiseDistance(newState, newState.dealerSeat, a.seatIndex) - clockwiseDistance(newState, newState.dealerSeat, b.seatIndex));
+        for (let index = 0; index < remainder; index++) {
+          const winner = oddChipOrder[index % oddChipOrder.length];
+          const existing = winnings.get(winner.seatIndex)!;
+          winnings.set(winner.seatIndex, { ...existing, amount: existing.amount + 1 });
+        }
+      }
+    }
+    for (const [seatIndex, winning] of Array.from(winnings.entries())) {
+      const winner = newState.players.find(player => player.seatIndex === seatIndex)!;
+      newState.handHistory.push({
+        handNumber: newState.handNumber,
+        action: 'win',
+        player: winner.odisplayName,
+        amount: winning.amount,
+        handDescription: winning.description,
+        timestamp: Date.now(),
+      });
+    }
   }
-  
-  // Evaluate all hands
-  const handResults = playersInHand.map(player => ({
-    player,
-    result: evaluateHand(player.holeCards, newState.communityCards),
-  }));
-  
-  // Sort by hand strength (best first)
-  handResults.sort((a, b) => compareHands(b.result, a.result));
-  
-  // Calculate side pots and distribute
-  const totalPot = newState.pots.reduce((sum, pot) => sum + pot.amount, 0);
-  
-  // Find winners (could be split pot)
-  const bestResult = handResults[0].result;
-  const winners = handResults.filter(hr => compareHands(hr.result, bestResult) === 0);
-  
-  const winAmount = Math.floor(totalPot / winners.length);
-  const remainder = totalPot - (winAmount * winners.length);
-  
-  for (let i = 0; i < winners.length; i++) {
-    winners[i].player.chips += winAmount + (i === 0 ? remainder : 0);
-  }
-  
+
   newState.pots = [{ amount: 0, eligiblePlayers: [] }];
-  
-  for (const winner of winners) {
-    newState.handHistory.push({
-      handNumber: newState.handNumber,
-      action: 'win',
-      player: winner.player.odisplayName,
-      amount: winAmount,
-      handDescription: winner.result.description,
-      timestamp: Date.now(),
-    });
-  }
-  
   newState.phase = 'hand_complete';
-  
-  // Advance dealer for next hand
-  newState.dealerSeat = getNextActiveSeat(newState, newState.dealerSeat, true);
-  
+  // Physical advancement preserves a dead button when the next seat is empty.
+  newState.dealerSeat = nextPhysicalSeat(newState, newState.dealerSeat);
   return newState;
 }
 
